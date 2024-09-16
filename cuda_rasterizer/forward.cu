@@ -75,6 +75,7 @@ __device__ glm::vec3 computeColorFromSH(int idx, int tidx, int deg, int max_coef
 	return glm::max(result, 0.0f);
 }
 
+//! added for hierarchical 3dgs interpolation
 __forceinline__ __device__ glm::vec3 interp(glm::vec3* a, glm::vec3* b, int i, float t)
 {
 	glm::vec3 arr = a[i];
@@ -83,6 +84,7 @@ __forceinline__ __device__ glm::vec3 interp(glm::vec3* a, glm::vec3* b, int i, f
 	return t * arr + (1.0f - t) * brr;
 }
 
+//! added for hierarchical 3dgs interpolation
 __device__ glm::vec3 computeColorFromSHInterp(int idx, int p_idx, int tidx, float t, int deg, int max_coeffs, const glm::vec3* means, glm::vec3 campos, const float* shs, bool* clamped)
 {
 	// The implementation is loosely based on code for 
@@ -138,7 +140,7 @@ __device__ glm::vec3 computeColorFromSHInterp(int idx, int p_idx, int tidx, floa
 }
 
 // Forward version of 2D covariance matrix computation
-__device__ float3 computeCov2D(const float3& mean, float focal_x, float focal_y, float tan_fovx, float tan_fovy, const float* cov3D, const float* viewmatrix)
+__device__ float3 computeCov2D(const float3& mean, float focal_x, float focal_y, float tan_fovx, float tan_fovy, const float* cov3D, const float* viewmatrix, const bool is_fisheye)
 {
 	// The following models the steps outlined by equations 29
 	// and 31 in "EWA Splatting" (Zwicker et al., 2002). 
@@ -148,15 +150,43 @@ __device__ float3 computeCov2D(const float3& mean, float focal_x, float focal_y,
 
 	const float limx = 1.3f * tan_fovx;
 	const float limy = 1.3f * tan_fovy;
+	// const float limx = 9982444353.f;
+	// const float limy = 9982444353.f;
 	const float txtz = t.x / t.z;
 	const float tytz = t.y / t.z;
 	t.x = min(limx, max(-limx, txtz)) * t.z;
 	t.y = min(limy, max(-limy, tytz)) * t.z;
 
-	glm::mat3 J = glm::mat3(
-		focal_x / t.z, 0.0f, -(focal_x * t.x) / (t.z * t.z),
-		0.0f, focal_y / t.z, -(focal_y * t.y) / (t.z * t.z),
-		0, 0, 0);
+	// glm::mat3 J = glm::mat3(
+	// 	focal_x / t.z, 0.0f, -(focal_x * t.x) / (t.z * t.z),
+	// 	0.0f, focal_y / t.z, -(focal_y * t.y) / (t.z * t.z),
+	// 	0, 0, 0);
+	glm::mat3 J;
+	if (is_fisheye) // fisheye
+	{
+		float eps = 0.0000001f;
+		float x2 = t.x * t.x + eps;
+		float y2 = t.y * t.y;
+		float xy = t.x * t.y;
+		float x2y2 = x2 + y2 ;
+		float len_xy = length(glm::vec2({t.x, t.y})) + eps;
+		float x2y2z2_inv = 1.f / (x2y2 + t.z * t.z);
+
+		float b = glm::atan(len_xy, t.z) / len_xy / x2y2;
+		float a = t.z * x2y2z2_inv / (x2y2);
+		J = glm::mat3(
+			focal_x * (x2 * a + y2 * b), focal_x * xy * (a - b),    - focal_x * t.x * x2y2z2_inv,
+			focal_y * xy  * (a - b),    focal_y * (y2 * a + x2 * b), - focal_y * t.y * x2y2z2_inv,
+			0, 0, 0
+		);
+	}
+	else
+	{
+		J = glm::mat3(
+			focal_x / t.z, 0.0f, -(focal_x * t.x) / (t.z * t.z),
+			0.0f, focal_y / t.z, -(focal_y * t.y) / (t.z * t.z),
+			0, 0, 0);
+	}
 
 	glm::mat3 W = glm::mat3(
 		viewmatrix[0], viewmatrix[4], viewmatrix[8],
@@ -217,12 +247,12 @@ __device__ void computeCov3D(const glm::vec3 scale, float mod, const glm::vec4 r
 // Perform initial steps for each Gaussian prior to rasterization.
 template<int C>
 __global__ void preprocessCUDA(int P, int D, int M,
-	const int* indices,
-	const int* parent_indices,
-	const float* ts,
+	const int* indices, //! added
+	const int* parent_indices, //! added
+	const float* ts, //! added
 	const float* orig_points,
 	const glm::vec3* scales,
-	const float scale_modifier,
+	const float scale_modifier, //! added
 	const glm::vec4* rotations,
 	const float* opacities,
 	const float* shs,
@@ -248,6 +278,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	int2* rects,
 	float3 boxmin,
 	float3 boxmax,
+	const int camera_model,
 	int skyboxnum,
 	float biglimit,
 	MatMat viewmats,
@@ -308,10 +339,30 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	}
 
 	// Bring points to screen space
-	float4 p_hom = transformPoint4x4(p_orig, projmatrix);
-	float p_w = 1.0f / (p_hom.w + 0.0000001f);
-	float3 p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w };
+	// float4 p_hom = transformPoint4x4(p_orig, projmatrix);
+	// float p_w = 1.0f / (p_hom.w + 0.0000001f);
+	// float3 p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w };
 	float3 p_view = transformPoint4x3(p_orig, viewmatrix);
+
+	float3 p_proj;
+	bool is_fisheye = (camera_model == 5 || camera_model == 8 || camera_model == 9);
+	if (is_fisheye) // panorama
+	{
+		float xy_len = glm::length(glm::vec2({p_view.x, p_view.y})) + 0.000001f;
+		float theta = glm::atan(xy_len, p_view.z + 0.0000001f);
+		// if (abs(theta) > 3.14 * 0.403)
+		if (abs(theta) > 3.14)
+			return; 
+		p_proj.x = 2 * p_view.x * focal_x * theta / (xy_len * W);
+		p_proj.y = 2 * p_view.y * focal_y * theta / (xy_len * H);
+		p_proj.z = 0;
+	}
+	else
+	{
+		float4 p_hom = transformPoint4x4(p_orig, projmatrix);
+		float p_w = 1.0f / (p_hom.w + 0.0000001f);
+		p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w };
+	}
 
 	if (p_view.z <= 0.2f)
 		return;
@@ -350,12 +401,14 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	}
 
 	// Compute 2D screen-space covariance matrix
-	float3 cov = computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix);
+	float3 cov = computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix, is_fisheye);
 
-	constexpr float h_var = 0.3f;
+	//! for anti-aliasing (filtering in EWA Splatting)
+	//! refer to EWA Splatting and Mip-Splatting: Alias-free 3DGS
+	constexpr float h_var = 0.3f; 
 	const float det_cov = cov.x * cov.z - cov.y * cov.y;
-	cov.x += h_var;
-	cov.z += h_var;
+	cov.x += h_var; //! apply gaussian blur filter
+	cov.z += h_var; //! Convolution with a filter is equivalent to addition in covariance
 	const float det_cov_plus_h_cov = cov.x * cov.z - cov.y * cov.y;
 
 #ifdef DGR_FIX_AA
@@ -656,6 +709,7 @@ void FORWARD::preprocess(int P, int D, int M,
 	int2* rects,
 	float3 boxmin,
 	float3 boxmax,
+	const int camera_model,
 	int skyboxnum,
 	cudaStream_t stream,
 	float biglimit,
@@ -704,6 +758,7 @@ void FORWARD::preprocess(int P, int D, int M,
 		rects,
 		boxmin,
 		boxmax,
+		camera_model,
 		skyboxnum,
 		biglimit,
 		viewview,

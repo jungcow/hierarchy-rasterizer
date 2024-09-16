@@ -57,7 +57,8 @@ RasterizeGaussiansCUDA(
 	const torch::Tensor& campos,
 	const bool prefiltered,
 	const bool debug,
-	const bool do_depth)
+	const bool do_depth, 
+	const int camera_model)
 {
   if (means3D.ndimension() != 2 || means3D.size(1) != 3) {
     AT_ERROR("means3D must have dimensions (num_points, 3)");
@@ -126,6 +127,7 @@ RasterizeGaussiansCUDA(
 		prefiltered,
 		out_color.contiguous().data<float>(),
 		out_invdepthptr,
+		camera_model,
 		radii.contiguous().data<int>(),
 		rects.contiguous().data<int>(),
 		nullptr,
@@ -154,6 +156,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
     const torch::Tensor& projmatrix,
 	const float tan_fovx,
 	const float tan_fovy,
+	const int camera_model,
     const torch::Tensor& dL_dout_color,
 	const torch::Tensor& dL_dout_invdepth,
 	const torch::Tensor& sh,
@@ -219,6 +222,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  campos.contiguous().data<float>(),
 	  tan_fovx,
 	  tan_fovy,
+	  camera_model,
 	  radii.contiguous().data<int>(),
 	  reinterpret_cast<char*>(geomBuffer.contiguous().data_ptr()),
 	  reinterpret_cast<char*>(binningBuffer.contiguous().data_ptr()),

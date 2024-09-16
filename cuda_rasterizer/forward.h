@@ -53,6 +53,7 @@ namespace FORWARD
 		int2* rects,
 		float3 boxmin,
 		float3 boxmax,
+		const int camera_model,
 		int skyboxnum,
 		cudaStream_t stream,
 		float biglimit,
